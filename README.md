@@ -130,6 +130,3 @@ An attacker can use any laser variation. A single CNN learns a generalised patte
 
 ---
 
-## Mentor One-liner
-
-> "We use KITTI autonomous driving frames (same domain, resolution, and camera modality as the attack scenario), apply physically-grounded stripe simulation from Köhler et al. 2021 and Stein et al. 2025, and train a 6-specialist ensemble CNN — one per attack variation profile — evaluated on a held-out KITTI test split and nuScenes frames unseen during training."

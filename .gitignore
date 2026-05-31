@@ -1,0 +1,27 @@
+# Dataset — too large for GitHub
+data/final_dataset/
+data/clean_base/
+data/_kaggle_temp/
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Model checkpoints
+checkpoints/
+*.pth
+
+# Logs and results
+logs/
+results/
+test_output/
+
+# Zip files
+*.zip
+*.tar.gz
+
+# VSCode
+.vscode/

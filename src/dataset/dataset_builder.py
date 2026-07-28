@@ -1,208 +1,235 @@
 """
-dataset_builder.py
-------------------
-Full dataset generation pipeline.
+Dataset builder for the rolling-shutter laser-attack simulator (v7).
+=====================================================================
+Reads clean background images, applies the simulator across a set of
+variations defined in a YAML config, and writes out a labeled image
+dataset with a metadata CSV.
 
-1. Scans data/clean_base/ for all images
-2. Resizes to config image_size
-3. Saves clean images as label=0
-4. For each of 6 variation profiles, injects stripes → label=1
-5. Splits into train / val / test (stratified)
-6. Writes data/final_dataset/labels.csv
+Usage:
+    python3 dataset_builder.py --config ../../configs/config.yaml
 
-Run:
-    python src/dataset/dataset_builder.py
-    OR
-    python run.py --mode generate
+Expected config keys (see simulator_config_v7.yaml):
+    paths.clean_base        - directory of clean background images (e.g. KITTI)
+    paths.final_dataset     - output directory
+    camera                  - CameraParams fields
+    ae                      - AEConfig fields
+    domain_randomization    - DomainRandomConfig fields
+    variations              - list of attack/clean variations to generate
+    split                   - train/val/test fractions
 """
 
-import os
-import sys
-import csv
-import shutil
-import random
 import argparse
+import csv
+import hashlib
+import os
+import random
+import sys
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 import yaml
-from tqdm import tqdm
 
-# Allow running from repo root
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.dataset.stripe_generator import inject_stripes
-from src.utils.logger import get_logger
+from rolling_shutter_simulator_v7 import (
+    AEConfig, CameraParams, DomainRandomConfig, EnvParams,
+    LaserModulation, LaserParams, RollingShutterSimulator,
+)
 
-logger = get_logger("dataset_builder")
-
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+MODULATION_MAP = {m.value: m for m in LaserModulation}
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
 
 
-def collect_images(clean_base: str, max_images: int) -> list:
-    """Return sorted list of image paths from clean_base directory."""
-    exts = {".jpg", ".jpeg", ".png", ".bmp"}
-    paths = []
-    for root, _, files in os.walk(clean_base):
-        for f in files:
-            if Path(f).suffix.lower() in exts:
-                paths.append(os.path.join(root, f))
+def variation_seed(base_seed: int, name: str) -> int:
+    """Deterministic, independent seed per variation, derived from base_seed
+    + variation name (not Python's hash(), which is randomized per-process
+    unless PYTHONHASHSEED is fixed). This means:
+      - each variation's images are reproducible regardless of which OTHER
+        variations are generated alongside it in a given run
+      - selectively regenerating just one or two variations (e.g. to apply
+        a bugfix) never disturbs any other variation's images, because each
+        variation's RNG stream no longer depends on shared sequential state
+        from processing earlier variations first.
+    Trade-off: fixed-pattern-noise/defect maps (keyed only by seed, not by
+    variation) will differ slightly between variations generated in the
+    same run vs. ones regenerated later - this is a ~2% multiplicative
+    per-pixel noise term, not a training-relevant difference, but worth
+    knowing about if you're being precise about "one consistent sensor."
+    """
+    h = hashlib.md5(f"{base_seed}-{name}".encode()).hexdigest()
+    return int(h[:8], 16)
 
-    paths.sort()
-    if len(paths) == 0:
-        raise FileNotFoundError(
-            f"\n\nNo images found in '{clean_base}'.\n"
-            "Please put KITTI images (or any driving scene images) in that folder.\n"
-            "KITTI download: http://www.cvlibs.net/datasets/kitti/eval_object.php\n"
-            "→ 'Left color images of object data set'"
-        )
 
-    if len(paths) > max_images:
-        random.shuffle(paths)
-        paths = paths[:max_images]
-        logger.info(f"Capped at {max_images} images (set max_images in config to change)")
-
-    logger.info(f"Found {len(paths)} clean base images in '{clean_base}'")
+def load_clean_images(clean_base: str):
+    # sorted() is required for reproducibility: Path.rglob() order is filesystem/OS
+    # dependent, so without sorting, the same --seed would pick different images
+    # on a different machine even with an identical clean_base folder.
+    paths = sorted(p for p in Path(clean_base).rglob("*") if p.suffix.lower() in IMG_EXTS)
+    if not paths:
+        raise FileNotFoundError(f"No images found under {clean_base}")
     return paths
 
 
-def stratified_split(paths: list, train: float, val: float, seed: int):
-    """Split list into train/val/test maintaining approximate ratios."""
-    random.seed(seed)
-    shuffled = paths.copy()
-    random.shuffle(shuffled)
-    n = len(shuffled)
-    n_train = int(n * train)
-    n_val   = int(n * val)
-    return (
-        shuffled[:n_train],
-        shuffled[n_train:n_train + n_val],
-        shuffled[n_train + n_val:]
+def sample_range(rng: random.Random, spec):
+    """spec is either [lo, hi] (uniform float) or a fixed scalar or a list of choices."""
+    if isinstance(spec, (list, tuple)):
+        if len(spec) == 2 and all(isinstance(v, (int, float)) for v in spec):
+            return rng.uniform(spec[0], spec[1])
+        return rng.choice(spec)
+    return spec
+
+
+def build_laser_params(rng: random.Random, var_cfg: dict) -> LaserParams:
+    return LaserParams(
+        frequency=sample_range(rng, var_cfg["frequency_range"]),
+        wavelength=int(sample_range(rng, var_cfg.get("wavelength_choices", [650]))),
+        power_mw=sample_range(rng, var_cfg.get("power_range", [10, 30])),
+        duty_cycle=sample_range(rng, var_cfg.get("duty_cycle_range", [0.3, 0.7])),
+        modulation=MODULATION_MAP[rng.choice(var_cfg.get("modulation_choices", ["square"]))],
+        phase=rng.uniform(0, 1),
+        angle_deg=sample_range(rng, var_cfg.get("angle_range", [0, 0])),
+        coverage=sample_range(rng, var_cfg.get("coverage_range", [0.3, 0.9])),
+        distance_m=sample_range(rng, var_cfg.get("distance_range", [5, 40])),
+        ellipticity=sample_range(rng, var_cfg.get("ellipticity_range", [0.5, 1.0])),
+        divergence_per_m=var_cfg.get("divergence_per_m", 0.02),
+        ref_distance_m=var_cfg.get("ref_distance_m", 10.0),
     )
 
 
-def process_and_save(
-    src_path: str,
-    dest_path: str,
-    image_size: int,
-    variation_cfg: dict = None,
-    seed: int = None,
-) -> bool:
-    """
-    Read image, optionally inject stripes, resize, save.
-    Returns True on success.
-    """
-    img = cv2.imread(src_path)
-    if img is None:
-        logger.warning(f"Could not read {src_path}, skipping.")
-        return False
+def sample_exposure_time(rng: random.Random, var_cfg: dict, default: float) -> float:
+    """Sample this image's row exposure time.
 
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    if variation_cfg is not None:
-        img_rgb = inject_stripes(img_rgb, variation_cfg, seed=seed)
-
-    img_resized = cv2.resize(img_rgb, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
-    img_bgr = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
-
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    cv2.imwrite(dest_path, img_bgr)
-    return True
+    ROOT CAUSE FIX: a fixed exposure_time (e.g. 1ms for every image, regardless
+    of variation) washes out stripe contrast whenever the PWM period is close
+    to or shorter than the exposure window - each row then integrates over a
+    full on/off cycle instead of catching one clean phase, and the modulation
+    averages to near-zero (verified: at 1000Hz with exposure_time=1ms, row-to-
+    row contrast std is ~0.03; at 200us it's ~0.43). Higher-frequency
+    variations need proportionally shorter exposure_time to stay visible, the
+    same way a real camera needs a fast shutter to catch fast PWM flicker.
+    Falls back to `default` (camera.exposure_time) if a variation doesn't
+    specify `exposure_time_range`."""
+    if "exposure_time_range" in var_cfg:
+        return sample_range(rng, var_cfg["exposure_time_range"])
+    return default
 
 
-def build_dataset(config_path: str = "configs/config.yaml"):
-    cfg         = load_config(config_path)
-    paths_cfg   = cfg["paths"]
-    ds_cfg      = cfg["dataset"]
-    variations  = ds_cfg["variations"]
-
-    clean_base      = paths_cfg["clean_base"]
-    final_dataset   = paths_cfg["final_dataset"]
-    image_size      = ds_cfg["image_size"]
-    max_images      = ds_cfg["max_images"]
-    seed            = ds_cfg["seed"]
-
-    # ── 1. Collect source images ───────────────────────────────────────────
-    all_images = collect_images(clean_base, max_images)
-
-    # ── 2. Split source images ─────────────────────────────────────────────
-    train_imgs, val_imgs, test_imgs = stratified_split(
-        all_images,
-        ds_cfg["train_split"],
-        ds_cfg["val_split"],
-        seed,
+def build_env_params(rng: random.Random, var_cfg: dict) -> EnvParams:
+    return EnvParams(
+        haze_factor=sample_range(rng, var_cfg.get("haze_range", [0.0, 0.1])),
+        lens_flare=sample_range(rng, var_cfg.get("lens_flare_range", [0.0, 0.15])),
+        chromatic_aberration=sample_range(rng, var_cfg.get("chromatic_aberration_range", [0.0, 0.1])),
     )
-    logger.info(f"Split: train={len(train_imgs)}, val={len(val_imgs)}, test={len(test_imgs)}")
 
-    splits = {"train": train_imgs, "val": val_imgs, "test": test_imgs}
 
-    # ── 3. Prepare CSV ─────────────────────────────────────────────────────
-    os.makedirs(final_dataset, exist_ok=True)
-    csv_path = os.path.join(final_dataset, "labels.csv")
-    rows = []  # (relative_path, label, split, variation)
+def assign_split(rng: random.Random, split_cfg: dict) -> str:
+    r = rng.random()
+    train = split_cfg.get("train", 0.7)
+    val = split_cfg.get("val", 0.15)
+    if r < train:
+        return "train"
+    if r < train + val:
+        return "val"
+    return "test"
 
-    total_clean     = 0
-    total_corrupted = 0
 
-    # ── 4. Process each split ──────────────────────────────────────────────
-    for split_name, img_list in splits.items():
-        logger.info(f"\nProcessing split: {split_name} ({len(img_list)} images)")
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="../../configs/config.yaml")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
 
-        for img_path in tqdm(img_list, desc=f"  Clean → {split_name}"):
-            fname = Path(img_path).stem + ".png"
-            dest  = os.path.join(final_dataset, split_name, "clean", fname)
-            ok = process_and_save(img_path, dest, image_size, variation_cfg=None, seed=seed)
-            if ok:
-                rel = os.path.relpath(dest, final_dataset)
-                rows.append({"path": rel, "label": 0, "split": split_name, "variation": "clean"})
-                total_clean += 1
+    config_path = Path(args.config).resolve()
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
 
-        # ── 5. Generate one corrupted copy per variation ───────────────────
-        for var_name, var_cfg in variations.items():
-            for i, img_path in enumerate(tqdm(img_list, desc=f"  {var_name} → {split_name}")):
-                fname = Path(img_path).stem + f"_{var_name}.png"
-                dest  = os.path.join(final_dataset, split_name, var_name, fname)
-                ok = process_and_save(
-                    img_path, dest, image_size,
-                    variation_cfg=var_cfg,
-                    seed=seed + i,
-                )
-                if ok:
-                    rel = os.path.relpath(dest, final_dataset)
-                    rows.append({"path": rel, "label": 1, "split": split_name, "variation": var_name})
-                    total_corrupted += 1
+    # Paths in the config are relative to the project root, i.e. the parent of
+    # the `configs/` directory the config file lives in. This makes the script
+    # work the same whether it's run from src/dataset/, the project root, or
+    # anywhere else.
+    project_root = config_path.parent.parent
+    clean_base = project_root / cfg["paths"]["clean_base"]
+    out_dir = project_root / cfg["paths"]["final_dataset"]
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 6. Write labels.csv ────────────────────────────────────────────────
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["path", "label", "split", "variation"])
-        writer.writeheader()
-        writer.writerows(rows)
+    cam = CameraParams(**cfg.get("camera", {}))
+    ae_cfg = AEConfig(**cfg.get("ae", {}))
+    dr_cfg = DomainRandomConfig(**{k: tuple(v) if isinstance(v, list) else v
+                                    for k, v in cfg.get("domain_randomization", {}).items()})
+    split_cfg = cfg.get("split", {"train": 0.7, "val": 0.15, "test": 0.15})
 
-    # ── 7. Summary ─────────────────────────────────────────────────────────
-    logger.info("\n" + "="*60)
-    logger.info("DATASET GENERATION COMPLETE")
-    logger.info("="*60)
-    logger.info(f"  Clean images    : {total_clean}")
-    logger.info(f"  Corrupted images: {total_corrupted}")
-    logger.info(f"  Total           : {total_clean + total_corrupted}")
-    logger.info(f"  Labels CSV      : {csv_path}")
-    logger.info(f"  Class balance   : {total_clean / (total_clean + total_corrupted):.1%} clean")
-    logger.info("="*60)
+    clean_paths = load_clean_images(clean_base)
+    print(f"Found {len(clean_paths)} clean background images in {clean_base}")
 
-    # Warn if badly imbalanced (shouldn't happen but good to check)
-    ratio = total_clean / max(1, total_corrupted)
-    if ratio < 0.14 or ratio > 0.87:
-        logger.warning(
-            f"Class imbalance detected (clean/corrupted={ratio:.2f}). "
-            "Consider adjusting max_images or number of variations."
-        )
+    rng = random.Random(args.seed)
+    sim = RollingShutterSimulator(cam, seed=args.seed, ae_cfg=ae_cfg)
+
+    labels_path = out_dir / "labels.csv"
+    total_written = 0
+    t0 = time.time()
+
+    with open(labels_path, "w", newline="") as lf:
+        writer = csv.writer(lf)
+        writer.writerow(["path", "label", "split", "variation", "frequency", "wavelength",
+                          "power_mw", "duty_cycle", "modulation", "coverage", "angle_deg",
+                          "distance_m", "ellipticity", "exposure_time", "ae_gain",
+                          "peak_saturation", "attack_area_fraction"])
+
+        for var_cfg in cfg["variations"]:
+            name = var_cfg["name"]
+            label = var_cfg.get("label", name)
+            count = int(var_cfg["count"])
+            is_clean = var_cfg.get("clean", False)
+
+            var_dir = out_dir / name
+            var_dir.mkdir(parents=True, exist_ok=True)
+
+            print(f"[{name}] generating {count} images (clean={is_clean}) ...")
+            for i in range(count):
+                src_path = clean_paths[rng.randrange(len(clean_paths))]
+                bg = cv2.imread(str(src_path))
+                if bg is None:
+                    continue
+                if bg.shape[:2] != (cam.height, cam.width):
+                    bg = cv2.resize(bg, (cam.width, cam.height))
+
+                split = assign_split(rng, split_cfg)
+
+                if is_clean:
+                    out = bg.copy()
+                    meta = {"frequency": 0, "wavelength": 0, "power_mw": 0, "duty_cycle": 0,
+                            "modulation": "none", "coverage": 0, "angle_deg": 0, "distance_m": 0,
+                            "ellipticity": 0, "exposure_time": 0, "ae_gain": 1.0,
+                            "peak_saturation": 0.0, "attack_area_fraction": 0.0}
+                else:
+                    laser = build_laser_params(rng, var_cfg)
+                    env = build_env_params(rng, var_cfg)
+                    # per-image exposure_time, matched to this variation's frequency
+                    # range - see sample_exposure_time() docstring for why this
+                    # matters (fixes stripe contrast washing out at high frequencies)
+                    sim.cam.exposure_time = sample_exposure_time(rng, var_cfg, cam.exposure_time)
+                    out, meta = sim.simulate_frame(bg, laser, env)
+                    meta["exposure_time"] = sim.cam.exposure_time
+
+                out = sim.domain_randomize(out, dr_cfg)
+
+                fname = f"{name}_{i:05d}.png"
+                fpath = var_dir / fname
+                cv2.imwrite(str(fpath), out)
+
+                writer.writerow([str(fpath.relative_to(out_dir)), label, split, name,
+                                  meta["frequency"], meta["wavelength"], meta["power_mw"],
+                                  meta["duty_cycle"], meta["modulation"], meta["coverage"],
+                                  meta["angle_deg"], meta["distance_m"], meta["ellipticity"], meta["exposure_time"],
+                                  meta["ae_gain"], meta["peak_saturation"],
+                                  meta["attack_area_fraction"]])
+                total_written += 1
+
+            print(f"[{name}] done.")
+
+    elapsed = time.time() - t0
+    print(f"\nWrote {total_written} images + labels to {out_dir} in {elapsed/60:.1f} minutes.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/config.yaml")
-    args = parser.parse_args()
-    build_dataset(args.config)
+    main()

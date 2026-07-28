@@ -1,18 +1,23 @@
 """
 losses.py
 ---------
-Focal loss for binary classification with class imbalance handling.
+Loss function factory for train.py. This file didn't exist yet - train.py
+imports `get_loss_fn` from here, so training would ImportError without it.
 
-Focal loss (Lin et al. 2017) downweights well-classified easy examples
-and focuses training on hard misclassified ones.
+Supports two loss types, selected via cfg["training"]["loss_type"]:
+  - "weighted_ce" (default): standard cross-entropy, weighted by inverse
+    class frequency (from LaserAttackDataset.get_class_weights()) to handle
+    any train-split imbalance between clean/attacked samples.
+  - "focal": focal loss, which down-weights easy (already-confident)
+    examples and focuses gradient on hard ones - useful if the model starts
+    getting very confident on easy variations (e.g. freq_ultra_aliasing,
+    which tends to have very high peak_saturation) while still missing
+    harder/subtler ones (e.g. freq_low_wide's broad, soft bands).
+    cfg["training"]["focal_gamma"] controls focusing strength (default 2.0).
 
-Formula: FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-
-Why focal over CrossEntropy for this project:
-  In early training, clean frames are "easy" — the network quickly learns
-  to classify them correctly. Standard CE then wastes gradient on them.
-  Focal loss focuses the network on the hard attacked examples where
-  stripes are subtle (freq_high_narrow, small coverage).
+Usage:
+    loss_fn = get_loss_fn(cfg, class_weights_tensor)
+    loss = loss_fn(logits, labels)
 """
 
 import torch
@@ -21,60 +26,53 @@ import torch.nn.functional as F
 
 
 class FocalLoss(nn.Module):
-    """
-    Multi-class focal loss (works for binary classification with num_classes=2).
+    """Multi-class focal loss (Lin et al., 2017), reduces to weighted CE when gamma=0."""
 
-    Args:
-        alpha : scalar or tensor of shape (num_classes,)
-                Per-class weight. Use 0.25 for balanced, higher for minority class.
-        gamma : focusing parameter. 0 = standard CE, 2 = standard focal.
-        reduction: "mean" | "sum" | "none"
-    """
-
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+    def __init__(self, alpha: torch.Tensor = None, gamma: float = 2.0):
         super().__init__()
-        self.alpha     = alpha
-        self.gamma     = gamma
-        self.reduction = reduction
+        self.alpha = alpha
+        self.gamma = gamma
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            logits  : (B, C) raw unnormalised logits
-            targets : (B,) integer class labels
-        Returns:
-            loss: scalar (if reduction != "none")
-        """
-        ce_loss = F.cross_entropy(logits, targets, reduction="none")
-        p_t     = torch.exp(-ce_loss)
-        focal   = self.alpha * (1 - p_t) ** self.gamma * ce_loss
-
-        if self.reduction == "mean":
-            return focal.mean()
-        elif self.reduction == "sum":
-            return focal.sum()
-        return focal
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(logits, labels, weight=self.alpha, reduction="none")
+        pt = torch.exp(-ce)  # model's predicted probability for the true class
+        focal_term = (1 - pt) ** self.gamma
+        return (focal_term * ce).mean()
 
 
 def get_loss_fn(cfg: dict, class_weights: torch.Tensor = None) -> nn.Module:
-    """
-    Build loss function from config.
+    """Build the loss function from config.
 
     Args:
         cfg           : full config dict
-        class_weights : optional tensor of shape (2,) for weighted CE
+        class_weights : (2,) tensor [weight_clean, weight_attacked], typically
+                         from LaserAttackDataset.get_class_weights(). Pass
+                         None to disable weighting (equal weight per class).
     """
-    loss_type = cfg["training"].get("loss", "focal")
+    train_cfg = cfg.get("training", {})
+    loss_type = train_cfg.get("loss_type", "weighted_ce")
 
     if loss_type == "focal":
-        alpha = cfg["training"].get("focal_alpha", 0.25)
-        gamma = cfg["training"].get("focal_gamma", 2.0)
-        return FocalLoss(alpha=alpha, gamma=gamma)
-
-    elif loss_type == "crossentropy":
-        if class_weights is not None:
-            return nn.CrossEntropyLoss(weight=class_weights)
-        return nn.CrossEntropyLoss()
-
+        gamma = train_cfg.get("focal_gamma", 2.0)
+        return FocalLoss(alpha=class_weights, gamma=gamma)
+    elif loss_type == "weighted_ce":
+        return nn.CrossEntropyLoss(weight=class_weights)
     else:
-        raise ValueError(f"Unknown loss type: {loss_type}. Use 'focal' or 'crossentropy'.")
+        raise ValueError(f"Unknown loss_type: {loss_type}. Use 'weighted_ce' or 'focal'.")
+
+
+# -- Quick test ----------------------------------------------------------------
+if __name__ == "__main__":
+    cfg = {"training": {"loss_type": "weighted_ce"}}
+    weights = torch.tensor([1.2, 0.9])
+    loss_fn = get_loss_fn(cfg, weights)
+    logits = torch.randn(8, 2)
+    labels = torch.randint(0, 2, (8,))
+    loss = loss_fn(logits, labels)
+    print("weighted_ce loss:", loss.item())
+
+    cfg["training"]["loss_type"] = "focal"
+    loss_fn = get_loss_fn(cfg, weights)
+    loss = loss_fn(logits, labels)
+    print("focal loss:", loss.item())
+    print("OK")

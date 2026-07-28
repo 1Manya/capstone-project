@@ -1,36 +1,32 @@
 """
 logger.py
 ---------
-Consistent logging across the entire project.
-Writes to console AND to logs/<name>.log file.
+Minimal logger factory. train.py imports `get_logger` from here - this file
+didn't exist yet, so training would ImportError without it.
+
+Just a thin wrapper around Python's standard logging module: prints
+timestamped messages to stdout, and guards against attaching duplicate
+handlers if get_logger() is called more than once with the same name
+(e.g. once per ensemble specialist).
 """
 
-import os
 import logging
-from datetime import datetime
+import sys
 
 
-def get_logger(name: str, log_dir: str = "logs") -> logging.Logger:
-    os.makedirs(log_dir, exist_ok=True)
+def get_logger(name: str = "app") -> logging.Logger:
     logger = logging.getLogger(name)
-
-    if logger.handlers:
-        return logger  # Already configured
-
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", "%H:%M:%S")
-
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    # File handler
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fh = logging.FileHandler(os.path.join(log_dir, f"{name}_{timestamp}.log"))
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-
+    if not logger.handlers:  # avoid duplicate handlers on repeated calls
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter("%(asctime)s | %(name)s | %(message)s", datefmt="%H:%M:%S")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
     return logger
+
+
+# -- Quick test ----------------------------------------------------------------
+if __name__ == "__main__":
+    log = get_logger("test")
+    log.info("logger OK")

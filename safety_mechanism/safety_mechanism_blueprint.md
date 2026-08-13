@@ -1,14 +1,12 @@
 # Safety Mechanism (Objective 2) — Blueprint
 
 **Project:** ResilientVision-Autonomous — Objective 2: Bayesian sensor-fusion safety fallback
-**Owner:** (you)
-**Last updated:** _update this line each time you touch this file_
 
 ---
 
-## 1. What this part does (one paragraph)
+## 1. What this part does 
 
-When the CNN (Objective 1, built by teammates) flags a camera frame as possibly
+When the CNN (Objective 1, still in process) flags a camera frame as possibly
 attacked, this module decides whether to trust that flag, reallocates trust away
 from the camera toward LiDAR/Radar/IMU, switches the vehicle into a degraded or
 emergency-stop navigation mode if needed, and writes a tamper-evident log entry
@@ -28,11 +26,10 @@ flowchart TD
     D -.gradual trust restore on<br/>sustained clean frames.-> C
 ```
 
-*(This renders automatically on GitHub/GitLab if you paste this file into your repo — teammates don't need any tool to view it.)*
 
 ---
 
-## 3. Interface contract (agree with CNN teammate BEFORE building Step 2)
+## 3. Interface contract (agree with  real CNN BEFORE building Step 2)
 
 | Field | Type | Notes |
 |---|---|---|
@@ -42,9 +39,6 @@ flowchart TD
 | `timestamp` | float | for sync with sensor topics |
 
 - ROS 2 topic name: `/detector/attack_status`
-- Message type: _(decide: custom `.msg`, or plain `std_msgs`? — fill in once agreed)_
-
-**Status:** ☐ Not yet agreed with teammate ☐ Agreed — write date here: ____________
 
 ---
 
@@ -119,10 +113,6 @@ flowchart TD
 
 ## 6. Notes / decisions log
 
-_(Add a dated line every time you make a real decision or hit a blocker, so
-future-you can reconstruct the "why" later — e.g. "2026-08-05: switched from
-Humble to Jazzy because Store didn't offer 22.04 catalog entry, no functional
-downside for our single-machine setup.")_
 
 -
 -

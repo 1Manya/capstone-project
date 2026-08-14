@@ -43,16 +43,6 @@ flowchart TD
 | `demo_dashboard.py` | Streamlit presentation dashboard - live camera feed, trust weights, vehicle state, audit log |
 | `safety_mechanism_blueprint.md` | Full build checklist and design notes |
 
-## Running the standalone modules (no ROS needed)
-
-Each core module can be run and tested on its own:
-```bash
-python3 trust_engine.py
-python3 temporal_validator.py
-python3 failsafe_state_machine.py
-python3 hash_chain_logger.py
-```
-Each prints its own unit test results (PASS/FAIL for a handful of scenarios).
 
 ## Running the ROS 2 pipeline
 
@@ -81,11 +71,6 @@ Opens a browser dashboard with presenter-controlled attack toggle, live
 trust weights, vehicle state, and a "tamper log" button that demonstrates
 the hash-chain catching a tampered record in real time.
 
-**Note:** the dashboard drives the pipeline with a presenter-controlled
-simulated CNN signal (same interface the real CNN will use), not a live
-connection to the trained model - this keeps the live demo fully reliable
-and presenter-paced. The underlying trust/validator/state-machine/logger
-logic is identical to what runs in the ROS 2 pipeline above.
 
 ## Status
 

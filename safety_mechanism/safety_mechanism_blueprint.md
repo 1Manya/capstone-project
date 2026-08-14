@@ -44,7 +44,7 @@ flowchart TD
 
 ## 4. Checklist — work through top to bottom
 
-### Step 0 — Environment setup
+###  Environment setup
 - [ ] WSL2 + Ubuntu installed
 - [ ] ROS 2 Jazzy Desktop installed (`ros-jazzy-desktop`, `ros-dev-tools`)
 - [ ] `source /opt/ros/jazzy/setup.bash` added to `~/.bashrc`
@@ -53,41 +53,41 @@ flowchart TD
 - [ ] nuScenes Mini downloaded into `~/data/nuscenes` (inside Ubuntu, not Windows `C:`)
 - [ ] Verified: `NuScenes(version='v1.0-mini', ...)` loads without error in Python
 
-### Step 1 — Sensor data → ROS 2 topics
+###  Sensor data → ROS 2 topics
 - [ ] nuScenes Mini scene converted to ROS 2 bag OR custom publisher script written
 - [ ] Topics confirmed publishing: `/sensors/camera`, `/sensors/lidar`, `/sensors/radar`, `/sensors/imu`
 - [ ] Verified with `ros2 topic echo /sensors/imu` during playback
 
-### Step 2 — Stub CNN publisher
+###  Stub CNN publisher
 - [ ] Interface contract (Section 3 above) locked in with teammate
 - [ ] Stub node built, publishing fake `{frame_id, label, confidence, timestamp}` on `/detector/attack_status`
 - [ ] Test patterns scripted: long clean streak, single noisy frame, sustained attack (4+ of 6 frames)
 
-### Step 3 — Bayesian trust engine (plain Python first, no ROS)
+###  Bayesian trust engine (plain Python first, no ROS)
 - [ ] Class written: input = current weights + (label, confidence) → output = updated weights
 - [ ] Unit test: high-confidence attack → camera weight drops sharply
 - [ ] Unit test: low/borderline confidence → weight barely moves
 - [ ] Unit test: sustained clean frames → weight recovers gradually (not instantly)
 
-### Step 4 — Temporal consistency validator (plain Python first, no ROS)
+###  Temporal consistency validator (plain Python first, no ROS)
 - [ ] Sliding window of last 5-6 frame labels implemented
 - [ ] Majority (4+) required to confirm an attack
 - [ ] Unit test: single noisy frame → ignored, no false trigger
 - [ ] Unit test: 4-of-6 attacked → confirmed
 
-### Step 5 — Fail-safe state machine
+###  Fail-safe state machine
 - [ ] States defined: `NORMAL` → `DEGRADED` → `EMERGENCY_STOP`
 - [ ] `DEGRADED` trigger wired to Step 4's confirmed-attack output
-- [ ] `EMERGENCY_STOP` trigger defined (what counts as "LiDAR/Radar insufficient" — write your definition here: ___________________)
+- [ ] `EMERGENCY_STOP` trigger defined
 - [ ] Gradual (not instant) restore to `NORMAL` on sustained clean frames
 - [ ] Unit test each transition with a scripted input sequence
 
-### Step 6 — Wrap into real ROS 2 nodes
+###  Wrap into real ROS 2 nodes
 - [ ] Steps 3-5 wrapped into a ROS 2 node subscribing to `/detector/attack_status` + `/sensors/*`
 - [ ] Node publishes current trust weights + safety state on a new topic
 - [ ] End-to-end test: Step 1 bag playback + Step 2 stub running together → visible state changes
 
-### Step 7 — SHA-256 hash-chain audit logger (independent, do anytime)
+###  SHA-256 hash-chain audit logger 
 - [ ] On confirmed attack: logs `{timestamp, position, frame_id, confidence, trust_weights, decision}`
 - [ ] Each entry includes SHA-256 hash of the previous entry
 - [ ] Test: tamper with an old log line, confirm the chain detectably breaks

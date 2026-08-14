@@ -71,6 +71,10 @@ Opens a browser dashboard with presenter-controlled attack toggle, live
 trust weights, vehicle state, and a "tamper log" button that demonstrates
 the hash-chain catching a tampered record in real time.
 
+## Demo
+
+![Safety Mechanism Demo](safety_demo.gif)
+
 
 ## Status
 

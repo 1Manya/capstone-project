@@ -1,0 +1,32 @@
+\begin{table*}[t]
+\centering
+\caption{Object-detector degradation under the rolling-shutter laser attack. ASR: attack success rate; SAR: spatial attribution rate; FP$_{100}$: induced false positives per 100 baseline detections; $\Delta$Conf: mean confidence drop of retained detections. 95\% cluster-bootstrap CIs over images.}
+\label{tab:detector_degradation}
+\footnotesize
+\begin{tabular}{llrrcccc}
+\toprule
+Detector & Attack profile & $N_{\mathrm{obj}}$ & $N_{\mathrm{img}}$ & ASR (\%) & SAR (\%) & FP$_{100}$ & $\Delta$Conf \\
+\midrule
+SSD300 & Low 60--200 & 4563 & 1517 & 66.1 [64.5, 67.6] & 69.0 & 19.5 & 0.210 \\
+ & Mid 200--800 & 4677 & 1530 & 68.1 [66.6, 69.7] & 65.3 & 14.5 & 0.215 \\
+ & High 0.8--2k & 4824 & 1544 & 74.3 [72.8, 75.8] & 62.0 & 11.4 & 0.221 \\
+ & Ultra 2k--5k & 4637 & 1530 & 78.2 [76.9, 79.6] & 64.9 & 11.8 & 0.228 \\
+ & Full 60--5k & 13196 & 4338 & 73.8 [72.9, 74.7] & 63.4 & 13.9 & 0.218 \\
+ & All attacks & 31897 & 10459 & 72.6 [72.0, 73.1] & 64.4 & 14.1 & 0.218 \\
+\midrule
+YOLOv8n & Low 60--200 & 4102 & 1419 & 75.6 [74.1, 77.2] & 61.8 & 14.5 & 0.139 \\
+ & Mid 200--800 & 4284 & 1422 & 80.7 [79.2, 82.1] & 57.0 & 13.8 & 0.143 \\
+ & High 0.8--2k & 4267 & 1418 & 82.3 [80.8, 83.9] & 55.9 & 12.6 & 0.149 \\
+ & Ultra 2k--5k & 4191 & 1449 & 85.8 [84.5, 87.1] & 58.5 & 9.5 & 0.162 \\
+ & Full 60--5k & 11872 & 4009 & 83.0 [82.1, 83.8] & 56.3 & 11.4 & 0.145 \\
+ & All attacks & 28716 & 9717 & 81.9 [81.4, 82.4] & 57.4 & 12.1 & 0.146 \\
+\midrule
+YOLOv8m & Low 60--200 & 5846 & 1559 & 62.3 [60.6, 63.8] & 67.1 & 17.9 & 0.101 \\
+ & Mid 200--800 & 6055 & 1596 & 68.0 [66.4, 69.5] & 64.1 & 15.1 & 0.119 \\
+ & High 0.8--2k & 5979 & 1547 & 69.6 [68.0, 71.2] & 60.4 & 14.4 & 0.106 \\
+ & Ultra 2k--5k & 5810 & 1579 & 72.1 [70.5, 73.6] & 66.3 & 13.1 & 0.117 \\
+ & Full 60--5k & 16687 & 4477 & 68.9 [67.9, 69.7] & 62.6 & 14.7 & 0.109 \\
+ & All attacks & 40377 & 10758 & 68.4 [67.8, 69.0] & 63.7 & 14.9 & 0.110 \\
+\bottomrule
+\end{tabular}
+\end{table*}

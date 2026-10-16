@@ -1,0 +1,34 @@
+METRIC DEFINITIONS (paste into Section: Evaluation Metrics)
+
+Reference detections. No human-annotated boxes exist for the synthetic frames, so the detections
+a detector produces on the clean version of a frame (confidence >= tau) are the reference set,
+following the practice of Kohler et al. (ACSAC 2021).
+Matching. A reference detection is RETAINED if the attacked frame contains a box with
+IoU >= 0.5 (class-agnostic); otherwise it is SUPPRESSED. Attacked-frame boxes matching no reference
+detection are induced false positives (FP).
+ASR (attack success rate) = suppressed / (suppressed + retained), pooled over reference
+detections. NOTE: this equals Kohler et al.'s "hidden objects" fraction only when matching is
+class-agnostic with IoU > 0.5; state the setting you ran.
+SAR (spatial attribution rate) = fraction of suppressed detections whose box overlaps the beam
+footprint by >= 30% (footprint = beam-intensity mask >= 0.3, recomputed from the stored
+laser parameters of each frame). Compare with the overlap of retained detections (Fig. detector_degradation b)
+to judge whether suppression is spatially localised or a global frame degradation.
+FP_100 = induced false positives per 100 reference detections.
+dConf = mean(clean confidence - attacked confidence) over retained detections.
+Severity = laser power (mW) x beam coverage (fraction of frame width).
+Confidence intervals: 95% percentile cluster bootstrap resampling images (n_boot = 1000).
+Classifier: TPR = attacked frames flagged; TNR = clean frames passed; TPR@1%FPR = TPR at the
+operating point with 1% false alarms (a false alarm may trigger a degraded driving mode);
+ECE = expected calibration error of the predicted-class confidence, 15 bins; probabilities are
+temperature-scaled on a validation split disjoint from the test split. Splits are by source
+background image, so no scene appears in two splits.
+
+SUGGESTED CAPTIONS
+Fig. detector_degradation: (a) Attack success rate per attack profile (frequency band) and detector.
+ (b) Mean overlap between each reference detection and the beam footprint, for suppressed vs
+ retained detections. (c) ASR versus attack severity (laser power x coverage), sextile bins.
+ Error bars/bands: 95% cluster-bootstrap CI over images.
+Fig. detector_confidence: (a) Empirical CDF of clean-frame confidence for retained and suppressed
+ detections. (b) False positives induced by the attack per 100 reference detections.
+Fig. classifier_evaluation: (a) ROC curves (log-scaled false-alarm axis). (b) Reliability diagram
+ before/after temperature scaling. (c) Correct-decision rate per attack profile; Wilson 95% CI.

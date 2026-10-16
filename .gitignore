@@ -25,3 +25,7 @@ test_output/
 
 # VSCode
 .vscode/
+# INOGRE VIRTUAL ENV
+venv/
+ .venv/
+

@@ -83,14 +83,14 @@ def get_detections(model, img_path, conf):
     return dets
 
 
-def match_detections(clean_dets, attacked_dets, iou_thresh):
+def match_detections(clean_dets, attacked_dets, iou_thresh, class_agnostic=False):
     """Greedy IoU+class matching. Returns (matched_pairs, lost, new)."""
     matched_pairs = []
     used_attacked = set()
     for c in clean_dets:
         best_iou, best_j = 0.0, None
         for j, a in enumerate(attacked_dets):
-            if j in used_attacked or a["cls"] != c["cls"]:
+            if j in used_attacked or (not class_agnostic and a["cls"] != c["cls"]):
                 continue
             iou = box_iou(c["box"], a["box"])
             if iou > best_iou:

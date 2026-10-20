@@ -80,6 +80,9 @@ def main():
     ap.add_argument("--model", default="yolov8n.pt")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--iou_thresh", type=float, default=0.3)
+    ap.add_argument("--class_agnostic", action="store_true",
+                    help="match boxes ignoring class. Köhler et al.'s 'hidden' = no corrupted-frame box with "
+                         "IoU > 0.5, class not required -> use --iou_thresh 0.5 --class_agnostic to compare with them")
     ap.add_argument("--mask_threshold", type=float, default=0.3)
     args = ap.parse_args()
 
@@ -134,7 +137,7 @@ def main():
             continue
 
         attacked_dets = get_detections(model, str(attacked_path), args.conf)
-        matched, lost, new = match_detections(clean_dets, attacked_dets, args.iou_thresh)
+        matched, lost, new = match_detections(clean_dets, attacked_dets, args.iou_thresh, class_agnostic=args.class_agnostic)
         mask = build_attack_mask(row, cam, sim, threshold=args.mask_threshold)
 
         for c, a, iou in matched:

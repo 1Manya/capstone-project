@@ -41,7 +41,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, confusion_matrix, classification_report,
@@ -63,6 +63,11 @@ def main():
     ap.add_argument("--out_model", default="fusion_classifier.joblib")
     ap.add_argument("--test_size", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--only_splits", nargs="*", default=None,
+                    help="keep only rows whose frame-level 'split' (column from run_ensemble_inference.py) is in "
+                         "this list, e.g. --only_splits val test. The CNN ensemble was trained on 'train' rows, "
+                         "so its probabilities there are over-confident and the meta-model would learn to trust "
+                         "them blindly.")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -76,6 +81,14 @@ def main():
         print(f"[WARN] significant row loss after merge - check that 'path' values "
               f"match exactly between the two input files (same separators, same split filter).")
 
+    if args.only_splits:
+        if "split" not in merged.columns:
+            raise SystemExit("--only_splits needs a 'split' column; pass --labels to run_ensemble_inference.py")
+        before = len(merged)
+        merged = merged[merged["split"].isin(args.only_splits)].reset_index(drop=True)
+        print(f"--only_splits {args.only_splits}: kept {len(merged)} of {before} rows "
+              f"(rows the CNN ensemble was trained on are excluded)")
+
     cnn_prob_cols = [c for c in cnn_df.columns if c.startswith("prob_")]
     if not cnn_prob_cols:
         raise ValueError("cnn_probs.csv has no columns starting with 'prob_' - "
@@ -85,9 +98,24 @@ def main():
     X = merged[feature_cols].fillna(0.0).values
     y = merged["is_attacked"].values
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=args.test_size, random_state=args.seed, stratify=y
-    )
+    # Split by SOURCE BACKGROUND, not by row. The dataset reuses ~7,500 backgrounds across
+    # ~97,500 images, so a random row split puts the same road scene in both train and test
+    # and inflates the score. Needs the source_clean_image column (extract_detection_features.py
+    # writes it; the CNN-probability file does not need it).
+    if "source_clean_image" in merged.columns and merged["source_clean_image"].notna().all():
+        groups = merged["source_clean_image"].values
+        gss = GroupShuffleSplit(n_splits=1, test_size=args.test_size, random_state=args.seed)
+        tr_idx, te_idx = next(gss.split(X, y, groups))
+        assert not (set(groups[tr_idx]) & set(groups[te_idx])), "background leaked across split"
+        X_train, X_test, y_train, y_test = X[tr_idx], X[te_idx], y[tr_idx], y[te_idx]
+        print(f"Group split by background: {len(set(groups[tr_idx]))} train / "
+              f"{len(set(groups[te_idx]))} test backgrounds (no overlap)")
+    else:
+        print("[WARN] no source_clean_image column - falling back to a RANDOM ROW split, which "
+              "shares backgrounds between train and test and will overstate performance.")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=args.test_size, random_state=args.seed, stratify=y
+        )
 
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)

@@ -55,6 +55,7 @@ Typical use (run from src/dataset/):
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -282,7 +283,26 @@ if TORCH_OK:
         return loss_sum / total, np.concatenate(all_logits), np.concatenate(all_y)
 
 
+def split_fingerprint(parts):
+    """Hash of exactly which images are in train/val/test. A checkpoint is only resumed if this matches,
+    so a changed --limit/--seed/--holdout_variation or features file can never leak test images into a
+    resumed model."""
+    h = hashlib.md5()
+    for k in ("train", "val", "test"):
+        h.update(k.encode())
+        h.update("|".join(sorted(parts[k]["path"].astype(str))).encode())
+    return h.hexdigest()
+
+
+def load_ckpt(path, device):
+    try:
+        return torch.load(path, map_location=device, weights_only=False)     # our own file
+    except TypeError:                                                         # torch < 1.13
+        return torch.load(path, map_location=device)
+
+
 def train_one_mode(mode, parts, root, args, device):
+    os.makedirs(args.out_dir, exist_ok=True)
     tr, va, te = parts["train"], parts["val"], parts["test"]
     mu, sd = fit_standardizer(det_matrix(tr))        # statistics from TRAIN only
 
@@ -304,8 +324,26 @@ def train_one_mode(mode, parts, root, args, device):
     lr = args.lr if args.lr is not None else (1e-3 if mode == "det" else 1e-4)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    best_auc, best_state, bad = float("-inf"), None, 0
-    for epoch in range(1, args.epochs + 1):
+    ckpt_path = os.path.join(args.out_dir, f"ckpt_{mode}.pt")
+    fp = "|".join([split_fingerprint(parts), mode, str(lr), str(args.dropout), str(args.batch_size),
+                   str(args.no_pretrained)])
+    best_auc, best_state, bad, start_epoch, stopped = float("-inf"), None, 0, 1, False
+    if os.path.isfile(ckpt_path):
+        ck = load_ckpt(ckpt_path, device)
+        if ck.get("fingerprint") != fp:
+            raise SystemExit(f"{ckpt_path} was made with a different data split or settings (--limit, --seed, "
+                             f"--holdout_variation, features file, lr, dropout, batch size). Rerun with the "
+                             f"original arguments, or delete that file to start this model from scratch.")
+        model.load_state_dict(ck["model"])
+        optimizer.load_state_dict(ck["optimizer"])
+        best_auc, best_state, bad = ck["best_auc"], ck["best_state"], ck["bad"]
+        start_epoch, stopped = ck["epoch"] + 1, ck["stopped"]
+        print(f"[{mode}] resuming: epochs 1-{ck['epoch']} already done"
+              + (" (training had early-stopped)" if stopped else ""), flush=True)
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        if stopped:
+            break
         tr_loss, _, _ = run_epoch(model, train_loader, device, criterion, optimizer)
         va_loss, va_logits, va_y = run_epoch(model, val_loader, device, criterion)
         va_p = softmax_np(va_logits)[:, 1]
@@ -314,12 +352,24 @@ def train_one_mode(mode, parts, root, args, device):
               f"val_loss {va_loss:.4f}  val_auc {va_auc:.4f}", flush=True)
         score = va_auc if va_auc == va_auc else -va_loss
         if score > best_auc:
-            best_auc, best_state, bad = score, copy.deepcopy(model.state_dict()), 0
+            best_auc, best_state, bad = float(score), copy.deepcopy(model.state_dict()), 0
         else:
             bad += 1
-            if bad >= args.patience:
-                print(f"[{mode}] early stop (no val improvement for {args.patience} epochs)")
-                break
+        stopped = bad >= args.patience
+        tmp = ckpt_path + ".tmp"                      # write-then-rename: a kill mid-save cannot corrupt it
+        torch.save({"fingerprint": fp, "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                    "epoch": epoch, "best_auc": float(best_auc), "best_state": best_state, "bad": bad,
+                    "stopped": stopped}, tmp)
+        os.replace(tmp, ckpt_path)
+        if stopped:
+            print(f"[{mode}] early stop (no val improvement for {args.patience} epochs)")
+            break
+        if args.budget is not None:
+            args.budget -= 1
+            if args.budget <= 0 and epoch < args.epochs:
+                print(f"\n[{mode}] paused after epoch {epoch} (--max_epochs_this_run reached). "
+                      f"Rerun the SAME command to continue from epoch {epoch + 1}.")
+                sys.exit(0)
 
     model.load_state_dict(best_state)
     _, va_logits, va_y = run_epoch(model, val_loader, device, criterion)
@@ -356,6 +406,8 @@ def train_one_mode(mode, parts, root, args, device):
     torch.save({"state_dict": model.state_dict(), "mode": mode, "temperature": T,
                 "det_mu": mu.tolist(), "det_sd": sd.tolist(), "det_cols": DET_COLS,
                 "dropout": args.dropout}, os.path.join(args.out_dir, f"model_{mode}.pt"))
+    if os.path.isfile(ckpt_path):
+        os.remove(ckpt_path)                           # finished: the final model_<mode>.pt replaces it
     return m_cal, per_var
 
 
@@ -414,6 +466,9 @@ def main():
                     help="comma-separated variations excluded from train/val and evaluated on test only. NOTE freq_random_full spans 60-5000 Hz, so to truly hold out the ultra band use freq_ultra_aliasing,freq_random_full")
     ap.add_argument("--limit", type=int, default=None, help="debug: randomly keep only N rows")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--max_epochs_this_run", type=int, default=None,
+                    help="train at most N epochs in this run, then stop cleanly (e.g. 2 per Kaggle session). "
+                         "Rerunning the same command resumes from the last finished epoch.")
     ap.add_argument("--skip_done", action="store_true",
                     help="skip any mode whose model_<mode>.pt and metrics_<mode>.json already exist in --out_dir "
                          "(restart-safe on Kaggle: a killed session only redoes the unfinished model)")
@@ -463,6 +518,7 @@ def main():
         print(f"{k}: {len(v)} images, {v['source_clean_image'].nunique()} backgrounds, "
               f"{v['is_attacked'].mean():.1%} attacked")
 
+    args.budget = args.max_epochs_this_run
     modes = ["cnn", "det", "fusion"] if args.mode == "all" else [args.mode]
     summary = {}
     for mode in modes:

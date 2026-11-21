@@ -209,6 +209,76 @@ def binary_metrics(y, p, thr=0.5):
 # torch model / data
 # ---------------------------------------------------------------------------
 
+IMG_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def load_external_set(ext_dir, labels_path=None):
+    """Read the external test set's labels and resolve every listed image to a real file under ext_dir.
+    The labels file may have been written on another machine (absolute or Windows paths), so images are
+    matched by FILE NAME. Returns (dataframe, labels_file_used)."""
+    ext_dir = Path(ext_dir)
+    if not ext_dir.exists():
+        raise SystemExit(f"--external_dir {ext_dir} does not exist. On Kaggle, list the inputs with:  ls /kaggle/input")
+    if labels_path:
+        lp = Path(labels_path)
+    else:
+        cands = sorted(ext_dir.rglob("labels*.csv"))
+        if not cands:
+            raise SystemExit(f"no labels*.csv found under {ext_dir}; pass --external_labels")
+        lp = next((c for c in cands if c.name == "labels.csv"), cands[0])
+        if len(cands) > 1:
+            print(f"[external] several label files found, using {lp}")
+    df = pd.read_csv(lp)
+    if "path" not in df.columns:
+        raise SystemExit(f"{lp} has no 'path' column (columns: {list(df.columns)})")
+    index, dupes = {}, 0
+    for q in ext_dir.rglob("*"):
+        if q.suffix.lower() in IMG_EXTS:
+            dupes += q.name in index
+            index.setdefault(q.name, str(q))
+    names = df["path"].map(lambda v: norm_path(v).rsplit("/", 1)[-1])
+    resolved = names.map(index)
+    if resolved.isna().any():
+        bad = names[resolved.isna()]
+        raise SystemExit(f"{len(bad)} of {len(df)} images listed in {lp} were not found under {ext_dir} "
+                         f"(matched by file name). Example: {bad.iloc[0]!r}. Is --external_dir the right dataset folder?")
+    out = df.copy()
+    out["path"] = resolved.values
+    if "is_attacked" not in out.columns:
+        out["is_attacked"] = names.str.contains("attacked", case=False).astype(int).values
+    out["is_attacked"] = out["is_attacked"].astype(int)
+    out["pair_key"] = names.str.extract(r"^(.*)_(?:clean|attacked)\.[A-Za-z]+$")[0].values
+    if "freq_hz" in out.columns:
+        out["freq_hz"] = pd.to_numeric(out["freq_hz"], errors="coerce")
+    if dupes:
+        print(f"[external] warning: {dupes} duplicate image file names under {ext_dir}; first match used")
+    return out.reset_index(drop=True), lp
+
+
+def pair_win_rate(df, p_col):
+    """Fraction of scenes where the ATTACKED twin gets a higher P(attacked) than its CLEAN twin (0.5 = chance).
+    Both twins share the background, so this cannot be explained by scene differences."""
+    d = df.dropna(subset=["pair_key"])
+    if d.empty:
+        return float("nan"), 0
+    wide = d.pivot_table(index="pair_key", columns="is_attacked", values=p_col, aggfunc="mean")
+    if 0 not in wide.columns or 1 not in wide.columns:
+        return float("nan"), 0
+    both = wide.dropna(subset=[0, 1])
+    if both.empty:
+        return float("nan"), 0
+    win = (both[1] > both[0]).mean() + 0.5 * (both[1] == both[0]).mean()
+    return float(win), int(len(both))
+
+
+def recall_by_freq(df, p_col, thr=0.5):
+    if "freq_hz" not in df.columns:
+        return {}
+    a = df[df["is_attacked"] == 1].dropna(subset=["freq_hz"])
+    return {(str(int(k)) if float(k).is_integer() else str(k)): {"n": int(len(g)), "recall": float((g[p_col] >= thr).mean())}
+            for k, g in a.groupby("freq_hz")}
+
+
 if TORCH_OK:
 
     class FrameDataset(Dataset):
@@ -411,6 +481,104 @@ def train_one_mode(mode, parts, root, args, device):
     return m_cal, per_var
 
 
+def external_det_features(ext_df, cache_csv, det_conf, device):
+    """SSD confidence statistics for the external images, computed exactly as in training
+    (same SSD300, same 224x224 resize, same confidence floor) and cached."""
+    import cv2
+    if os.path.isfile(cache_csv):
+        cached = pd.read_csv(cache_csv)
+        if set(ext_df["path"]) <= set(cached["path"]):
+            print(f"[external] using cached SSD features: {cache_csv}")
+            return ext_df.merge(cached[["path"] + DET_COLS], on="path", how="left")
+    from extract_detection_features import extract_features, load_model as load_ssd
+    ssd, pre = load_ssd(device)
+    rows = []
+    for i, p in enumerate(ext_df["path"]):
+        img = cv2.imread(p)
+        if img is None:
+            raise SystemExit(f"cannot read image {p}")
+        if img.shape[:2] != (IMG_SIZE, IMG_SIZE):
+            img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+        f = extract_features(ssd, pre, img, det_conf, device)
+        f["path"] = p
+        rows.append(f)
+        if i % 500 == 0:
+            print(f"  [external] SSD features {i}/{len(ext_df)}", flush=True)
+    feats = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(cache_csv) or ".", exist_ok=True)
+    feats.to_csv(cache_csv, index=False)
+    return ext_df.merge(feats[["path"] + DET_COLS], on="path", how="left")
+
+
+def evaluate_external(mode, ext_df, args, device):
+    """Score a TRAINED model (loaded from model_<mode>.pt) on the external set. Nothing is fitted here:
+    the temperature comes from the internal validation split, the threshold is fixed at 0.5."""
+    mpath = os.path.join(args.out_dir, f"model_{mode}.pt")
+    if not os.path.isfile(mpath):
+        print(f"[external] {mpath} not found - skipping mode {mode}")
+        return None
+    ck = load_ckpt(mpath, device)
+    model = FusionNet(mode, len(DET_COLS), pretrained=False, dropout=ck["dropout"]).to(device)
+    model.load_state_dict(ck["state_dict"])
+    model.eval()
+    T = float(ck["temperature"])
+    if mode in ("det", "fusion"):
+        X = (det_matrix(ext_df) - np.array(ck["det_mu"], np.float32)) / np.array(ck["det_sd"], np.float32)
+    else:
+        X = np.zeros((len(ext_df), len(DET_COLS)), np.float32)
+    ds = FrameDataset(ext_df, "", X.astype(np.float32), need_image=mode in ("cnn", "fusion"))
+    loader = DataLoader(ds, batch_size=max(1, min(args.batch_size, len(ext_df))), shuffle=False,
+                        num_workers=args.num_workers)
+    _, logits, y = run_epoch(model, loader, device, nn.CrossEntropyLoss())
+    p_raw, p_cal = softmax_np(logits)[:, 1], softmax_np(logits / T)[:, 1]
+
+    m = binary_metrics(y, p_cal)
+    m["ece_raw"], m["ece_calibrated"], m["temperature"] = ece_score(p_raw, y), ece_score(p_cal, y), T
+    pred = ext_df[[c for c in ("path", "is_attacked", "pair_key", "freq_hz") if c in ext_df.columns]].copy()
+    pred["p_attacked_raw"], pred["p_attacked_calibrated"] = p_raw, p_cal
+    m["pair_win_rate"], m["n_pairs"] = pair_win_rate(pred, "p_attacked_calibrated")
+    by_freq = recall_by_freq(pred, "p_attacked_calibrated")
+
+    pred.to_csv(os.path.join(args.out_dir, f"predictions_external_{mode}.csv"), index=False)
+    with open(os.path.join(args.out_dir, f"metrics_external_{mode}.json"), "w") as f:
+        json.dump({"mode": mode, "external": m, "recall_by_frequency_hz": by_freq}, f, indent=2)
+    return m
+
+
+def run_external(args, modes, device):
+    ext_df, lp = load_external_set(args.external_dir, args.external_labels)
+    print(f"\n=== EXTERNAL TEST SET: {len(ext_df)} images ({int(ext_df['is_attacked'].sum())} attacked) from {lp} ===")
+    if any(m in ("det", "fusion") for m in modes):
+        ext_df = external_det_features(ext_df, os.path.join(args.out_dir, "external_det_features.csv"),
+                                       args.det_conf, device)
+    results = {}
+    for mode in modes:
+        r = evaluate_external(mode, ext_df, args, device)
+        if r is not None:
+            results[mode] = r
+    if not results:
+        print("no trained models found to evaluate")
+        return
+    cols = ["accuracy", "balanced_accuracy", "roc_auc", "recall_attacked", "specificity_clean",
+            "pair_win_rate", "tpr_at_1pct_fpr", "ece_calibrated", "n"]
+    table = pd.DataFrame(results).T[cols]
+    print("\n=== EXTERNAL TEST: real nuScenes frames + real captured stripe patterns (never trained on) ===")
+    print(table.round(4).to_string())
+    table.to_csv(os.path.join(args.out_dir, "external_table.csv"))
+    print("\nHow to read it: roc_auc / balanced_accuracy use all images. pair_win_rate = fraction of scenes where the "
+          "attacked copy scores higher than its clean twin (0.5 = chance) - it cannot be explained by scene differences. "
+          "Compare specificity_clean (clean frames passed) with recall_attacked: high specificity with low recall means "
+          "the stripes are not being recognised.")
+    print(f"saved: external_table.csv, metrics_external_*.json, predictions_external_*.csv in {args.out_dir}/")
+
+
+def report_saved(out_dir, modes):
+    print("\nSaved models:")
+    for m in modes:
+        p = os.path.join(out_dir, f"model_{m}.pt")
+        print(f"  {p}  " + (f"{os.path.getsize(p) / 1e6:.1f} MB" if os.path.isfile(p) else "NOT FOUND"))
+
+
 def predict_image(args):
     """Classify ONE new frame with a trained checkpoint (runs SSD for the detector features)."""
     import cv2
@@ -472,6 +640,12 @@ def main():
     ap.add_argument("--skip_done", action="store_true",
                     help="skip any mode whose model_<mode>.pt and metrics_<mode>.json already exist in --out_dir "
                          "(restart-safe on Kaggle: a killed session only redoes the unfinished model)")
+    ap.add_argument("--external_dir", default=None,
+                    help="folder of an EXTERNAL test set (e.g. /kaggle/input/nuscenes-attack-test, containing labels.csv "
+                         "and the images). Evaluated after training, never trained on.")
+    ap.add_argument("--external_labels", default=None, help="labels csv, if not simply labels.csv inside --external_dir")
+    ap.add_argument("--eval_external_only", action="store_true",
+                    help="skip training; score the models already saved in --out_dir on --external_dir")
     ap.add_argument("--predict_image", default=None)
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--det_conf", type=float, default=0.15, help="SSD confidence floor for features")
@@ -484,6 +658,13 @@ def main():
         if not args.checkpoint:
             sys.exit("--predict_image needs --checkpoint")
         predict_image(args)
+        return
+    if args.eval_external_only:
+        if not args.external_dir:
+            sys.exit("--eval_external_only needs --external_dir")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"device: {device}")
+        run_external(args, ["cnn", "det", "fusion"] if args.mode == "all" else [args.mode], device)
         return
     if not args.det_features:
         sys.exit("--det_features is required for training")
@@ -531,7 +712,7 @@ def main():
         print(f"\n=== training mode: {mode} ===")
         summary[mode], per_var = train_one_mode(mode, parts, root, args, device)
 
-    cols = ["balanced_accuracy", "roc_auc", "recall_attacked", "specificity_clean",
+    cols = ["accuracy", "balanced_accuracy", "roc_auc", "recall_attacked", "specificity_clean",
             "precision_attacked", "f1_attacked", "tpr_at_1pct_fpr", "fp", "fn",
             "ece_raw", "ece_calibrated"]
     table = pd.DataFrame(summary).T[cols]
@@ -541,6 +722,9 @@ def main():
     print(f"\nbase rate of 'attacked' in test: {summary[modes[0]]['base_rate_attacked']:.1%} "
           f"(accuracy alone is misleading when this is far from 50%)")
     print(f"saved to {args.out_dir}/ (ablation_table.csv, metrics_*.json, predictions_test_*.csv, model_*.pt)")
+    report_saved(args.out_dir, modes)
+    if args.external_dir:
+        run_external(args, modes, device)
 
 
 if __name__ == "__main__":

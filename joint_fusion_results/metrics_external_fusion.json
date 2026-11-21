@@ -1,0 +1,42 @@
+{
+  "mode": "fusion",
+  "external": {
+    "n": 2400,
+    "base_rate_attacked": 0.5,
+    "accuracy": 0.5375,
+    "balanced_accuracy": 0.5375,
+    "recall_attacked": 0.075,
+    "specificity_clean": 1.0,
+    "precision_attacked": 1.0,
+    "f1_attacked": 0.13953488372093023,
+    "roc_auc": 0.8322625,
+    "tpr_at_1pct_fpr": 0.2891666666666667,
+    "tp": 90,
+    "tn": 1200,
+    "fp": 0,
+    "fn": 1110,
+    "ece_raw": 0.44935420371318624,
+    "ece_calibrated": 0.45552297722533447,
+    "temperature": 0.5257501564925282,
+    "pair_win_rate": 0.9924999999999999,
+    "n_pairs": 1200
+  },
+  "recall_by_frequency_hz": {
+    "25": {
+      "n": 166,
+      "recall": 0.018072289156626505
+    },
+    "259": {
+      "n": 341,
+      "recall": 0.008797653958944282
+    },
+    "511": {
+      "n": 362,
+      "recall": 0.06906077348066299
+    },
+    "750": {
+      "n": 331,
+      "recall": 0.1782477341389728
+    }
+  }
+}

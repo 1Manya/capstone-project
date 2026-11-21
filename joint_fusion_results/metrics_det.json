@@ -1,0 +1,75 @@
+{
+  "mode": "det",
+  "test_calibrated": {
+    "n": 14670,
+    "base_rate_attacked": 0.8689843217450579,
+    "accuracy": 0.7285616905248807,
+    "balanced_accuracy": 0.6684051069854218,
+    "recall_attacked": 0.7499215563225604,
+    "specificity_clean": 0.586888657648283,
+    "precision_attacked": 0.9233146610005795,
+    "f1_attacked": 0.8276339710847544,
+    "roc_auc": 0.7208455624387184,
+    "tpr_at_1pct_fpr": 0.03514276749294007,
+    "tp": 9560,
+    "tn": 1128,
+    "fp": 794,
+    "fn": 3188,
+    "ece_raw": 0.11915490867312294,
+    "ece_calibrated": 0.08017098961109784,
+    "temperature": 0.662919021082906
+  },
+  "test_uncalibrated": {
+    "n": 14670,
+    "base_rate_attacked": 0.8689843217450579,
+    "accuracy": 0.7285616905248807,
+    "balanced_accuracy": 0.6684051069854218,
+    "recall_attacked": 0.7499215563225604,
+    "specificity_clean": 0.586888657648283,
+    "precision_attacked": 0.9233146610005795,
+    "f1_attacked": 0.8276339710847544,
+    "roc_auc": 0.7208455828455023,
+    "tpr_at_1pct_fpr": 0.03514276749294007,
+    "tp": 9560,
+    "tn": 1128,
+    "fp": 794,
+    "fn": 3188
+  },
+  "per_variation_test": {
+    "clean": {
+      "n": 1922,
+      "specificity_clean": 0.586888657648283,
+      "mean_p_attacked": 0.42676645517349243
+    },
+    "freq_high_fine": {
+      "n": 1876,
+      "recall_attacked": 0.7803837953091685,
+      "mean_p_attacked": 0.630527138710022
+    },
+    "freq_low_wide": {
+      "n": 1876,
+      "recall_attacked": 0.6769722814498934,
+      "mean_p_attacked": 0.5839848518371582
+    },
+    "freq_mid_narrow": {
+      "n": 1830,
+      "recall_attacked": 0.7185792349726776,
+      "mean_p_attacked": 0.6021575927734375
+    },
+    "freq_random_full": {
+      "n": 5236,
+      "recall_attacked": 0.7572574484339191,
+      "mean_p_attacked": 0.6189846992492676
+    },
+    "freq_ultra_aliasing": {
+      "n": 1930,
+      "recall_attacked": 0.8010362694300518,
+      "mean_p_attacked": 0.636814534664154
+    }
+  },
+  "split_sizes": {
+    "train": 68335,
+    "val": 14495,
+    "test": 14670
+  }
+}

@@ -1,0 +1,52 @@
+# Frequency-specialised ResNet18 ensemble + SSD feature fusion
+paths:
+  # Resolved relative to the project root (the parent of configs/).
+  final_dataset: data/final_dataset
+  output_dir: joint_fusion_ensemble_results
+
+specialists:
+  # Each model trains on CLEAN + exactly one attack variation.
+  variations:
+    - freq_low_wide
+    - freq_mid_narrow
+    - freq_high_fine
+    - freq_ultra_aliasing
+    - freq_random_full
+
+split:
+  # Splits are by source_clean_image, so versions of one background cannot
+  # appear across train/validation/test.
+  specialist_train: 0.60
+  specialist_val: 0.10
+  fusion_train: 0.15
+  fusion_val: 0.05
+  test: 0.10
+
+training:
+  image_size: 224
+  batch_size: 32
+  num_workers: 2
+  pin_memory: true
+  seed: 42
+  epochs: 12
+  patience: 3
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+
+model:
+  backbone: resnet18
+  pretrained: true
+  dropout: 0.30
+
+fusion:
+  # Input = 5 specialist probabilities + 5 standardised SSD features.
+  hidden_dim: 32
+  dropout: 0.20
+  batch_size: 128
+  epochs: 40
+  patience: 6
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+evaluation:
+  threshold: 0.50

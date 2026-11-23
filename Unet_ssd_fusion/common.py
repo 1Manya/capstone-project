@@ -32,32 +32,53 @@ def load_labels():
     return df
 
 def resolve_image_path(path_value, variation=None):
-    p = Path(str(path_value))
+    # Convert Windows separators to Linux separators
+    path_value = str(path_value).replace("\\", "/")
+    p = Path(path_value)
+
     if p.is_absolute() and p.exists():
         return p
+
     candidates = [IMAGE_ROOT / p]
+
     if variation:
-        candidates.append(IMAGE_ROOT / str(variation) / p)
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError(f"Image not found for path={path_value}, variation={variation}")
+        # Avoid adding variation twice
+        if not (p.parts and p.parts[0] == str(variation)):
+            candidates.append(IMAGE_ROOT / str(variation) / p)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        f"Image not found. Checked: {candidates}"
+    )
+
 
 def relative_image_path(path_value, variation=None):
-    p = Path(str(path_value))
+    # Convert Windows separators to Linux separators
+    path_value = str(path_value).replace("\\", "/")
+    p = Path(path_value)
+
     if p.is_absolute():
         try:
             return p.relative_to(IMAGE_ROOT)
         except ValueError:
             pass
-    # If path already starts with a variation directory, do not prepend it.
-    if len(p.parts) > 1 and p.parts[0] in {
-        "clean", "freq_low_wide", "freq_mid_narrow",
-        "freq_high_fine", "freq_ultra_aliasing", "freq_random_full"
+
+    if p.parts and p.parts[0] in {
+        "clean",
+        "freq_low_wide",
+        "freq_mid_narrow",
+        "freq_high_fine",
+        "freq_ultra_aliasing",
+        "freq_random_full"
     }:
         return p
+
     if variation:
         return Path(str(variation)) / p
+
     return p
 
 def get_split(df, name):

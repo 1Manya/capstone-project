@@ -1,132 +1,351 @@
-# 🚨 Laser Dazzle Attack Detection for Autonomous Vehicles
+# Rolling-Shutter Laser Attack Detection Using U-Net, SSD and Feature Fusion
 
-Binary CNN classifier that detects rolling shutter laser dazzle attacks on CMOS cameras in real-time.
+## Overview
 
----
+This project focuses on detecting laser-induced rolling-shutter interference in camera images. Such attacks can introduce visual distortions and affect the reliability of camera-based perception systems.
 
-## What This Project Does
+The updated architecture uses a **U-Net segmentation model, a pretrained SSD object detector, and a feature-fusion neural network** to classify an input image as either:
 
-An attacker shines a modulated laser at a dashcam. Due to the rolling shutter mechanism in CMOS sensors, the camera captures horizontal stripes instead of a clean frame. These stripes fool object detection models into missing pedestrians, signs, and vehicles.
+- **Clean** – No laser attack detected.
+- **Corrupt** – Laser-induced interference detected.
 
-**This CNN detects those stripes at the frame level — one inference per frame, binary output: clean (0) or attacked (1).**
+Unlike the earlier multi-class classification approach, the updated system performs binary clean/corrupt classification while combining information from both image segmentation and object detection.
 
-Research basis:
-- Köhler et al. 2021 — angle, frequency, partial coverage parameters
-- Stein et al. 2025 — duty cycle / stripe width parameters
-- Invisible Perturbations 2020 — full-frame injection methodology
+The system is also evaluated on an independent nuScenes-based dataset generated using a separate Köhler rolling-shutter attack engine, without retraining or fine-tuning the trained fusion model.
 
 ---
 
-## Repository Structure
+## 1. Updated System Architecture
 
+The proposed architecture follows a parallel feature-extraction and fusion approach.
+
+```text
+                  Input Camera Image
+                          |
+              -------------------------
+              |                       |
+       U-Net Segmentation       SSD300 Object Detection
+              |                       |
+       Segmentation Mask        Detection Information
+              |                       |
+       U-Net Features             SSD Features
+              |                       |
+              -----------+------------
+                         |
+                  Feature Fusion
+                         |
+                    Fusion MLP
+                         |
+                Binary Classification
+                         |
+                 ----------------
+                 |              |
+               Clean          Corrupt
 ```
-laser-attack-detection/
+
+### Component Description
+
+**1. Mask Generation**
+
+- Generates masks representing laser-affected regions.
+- Uses simulated attack information to create segmentation targets.
+- These masks are used to train the U-Net segmentation model.
+
+**2. U-Net Segmentation Model**
+
+- Identifies potentially affected regions in an input image.
+- Produces a segmentation probability map.
+- Extracts five numerical features:
+  - Mask coverage
+  - Mean segmentation probability
+  - Maximum segmentation probability
+  - Connected component count
+  - Largest connected component
+
+**3. SSD Object Detection**
+
+- Uses pretrained SSD300 with a VGG16 backbone and COCO weights.
+- Extracts object detection confidence information.
+- Uses a confidence floor of 0.15.
+- Extracts five numerical features:
+  - Number of detections
+  - Mean confidence
+  - Maximum confidence
+  - Standard deviation of confidence
+  - Number of low-confidence detections
+
+**4. Feature Fusion and Classification**
+
+The five U-Net features and five SSD features are concatenated into a single 10-dimensional feature vector.
+
+A Fusion MLP processes the combined representation and predicts the final binary class.
+
+The model outputs:
+- Clean probability
+- Corrupt probability
+- Predicted class
+
+### Fusion MLP Architecture
+
+```text
+Input: 10 Features
+       |
+Linear (10 → 128)
+       |
+Batch Normalization
+       |
+ReLU + Dropout (0.30)
+       |
+Linear (128 → 64)
+       |
+Batch Normalization
+       |
+ReLU + Dropout (0.20)
+       |
+Linear (64 → 2)
+       |
+Clean / Corrupt
+```
+
+---
+
+## 2. Dataset
+
+### Training and Internal Evaluation Dataset
+
+The simulated dataset contains **97,500 images** across six original categories.
+
+| Original Category | Number of Images |
+|---|---:|
+| Clean | 12,500 |
+| Attack Low | 12,500 |
+| Attack Mid | 12,500 |
+| Attack High | 12,500 |
+| Attack Ultra | 12,500 |
+| Attack Full Range | 35,000 |
+| **Total** | **97,500** |
+
+For the updated binary classification task, the labels are mapped as follows:
+
+| Original Label | Binary Label |
+|---|---|
+| Clean | 0 – Clean |
+| All Attack Categories | 1 – Corrupt |
+
+The dataset is imbalanced, with 12,500 clean images and 85,000 attacked images.
+
+To address this imbalance, class-weighted Cross Entropy Loss is used during fusion model training. The class weights are calculated using the training split.
+
+### Independent External Evaluation Dataset
+
+An additional dataset containing **2,400 images** is used to evaluate generalization.
+
+Dataset characteristics:
+
+- 1,200 clean images
+- 1,200 attacked images
+- Six nuScenes camera views
+- Attack patterns generated using a separate Köhler rolling-shutter attack engine
+- Attack frequencies: 25 Hz, 259 Hz, 511 Hz and 750 Hz
+
+The external dataset is kept separate from model training.
+
+---
+
+## 3. Training Methodology
+
+### U-Net Training
+
+- Trained using generated laser-affected region masks.
+- Training completed for 30 epochs.
+- Best validation loss: 0.5766
+- Final training loss: 0.4263
+
+### SSD Object Detection
+
+- Uses pretrained SSD300-VGG16 COCO weights.
+- No SSD retraining is performed.
+- Detection features are extracted using the same preprocessing and confidence thresholds used during fusion feature generation.
+
+### Fusion Model Training
+
+- Input features: 10
+- Output classes: 2
+- Loss function: Weighted Cross Entropy Loss
+- Optimizer: As configured in the training script.
+- Best checkpoint selected using validation F1-score.
+- Feature scaling is fitted only on the training split and reused during evaluation.
+
+**Best validation results:**
+
+- Best epoch: 7
+- Validation F1-score: 99.75%
+
+---
+
+## 4. Internal Test Results
+
+The trained binary fusion model achieved the following results on the internal test dataset.
+
+| Metric | Result |
+|---|---:|
+| Accuracy | 99.49% |
+| Clean Precision | 97% |
+| Clean Recall | 99% |
+| Clean F1-score | 98% |
+| Corrupt Precision | 100% |
+| Corrupt Recall | 100% |
+| Corrupt F1-score | 100% |
+
+### Internal Test Confusion Matrix
+
+```text
+                 Predicted
+               Clean  Corrupt
+
+Actual Clean    1897     22
+Actual Corrupt    53   12725
+```
+
+Total test samples: 14,697.
+
+---
+
+## 5. Independent External Evaluation
+
+To evaluate generalization beyond the simulated training dataset, the trained fusion model was tested on the independent nuScenes-based attack dataset.
+
+**Important:** The external evaluation was performed without retraining, fine-tuning, or refitting the feature scaler.
+
+### External Evaluation Results
+
+| Metric | Result |
+|---|---:|
+| Accuracy | 82.50% |
+| Precision | 79.28% |
+| Recall | 88.00% |
+| F1-score | 83.41% |
+| Specificity | 77.00% |
+| ROC-AUC | 90.66% |
+
+### External Test Confusion Matrix
+
+```text
+                 Predicted
+               Clean  Corrupt
+
+Actual Clean     924    276
+Actual Corrupt   144   1056
+```
+
+Total external test samples: 2,400.
+
+### Results Interpretation
+
+- The model correctly identified 88% of attacked images.
+- It correctly classified 77% of clean images.
+- The ROC-AUC of 90.66% indicates good separation between clean and attacked samples.
+- The performance difference between internal and external evaluation indicates a domain gap between the simulated training data and the independently generated external data.
+
+These results demonstrate promising cross-dataset generalization, although further testing across different attack conditions and real camera environments is necessary.
+
+---
+
+## 6. Model Outputs
+
+For each input image, the system produces:
+
+```text
+Predicted Class: Clean / Corrupt
+
+Clean Probability: 0.XX
+Corrupt Probability: 0.XX
+```
+
+The predicted class is selected using the model's output probabilities.
+
+---
+
+## 7. Project Structure
+
+```text
+capstone-project/
 │
-├── configs/
-│   └── config.yaml              ← All hyperparameters and paths in one place
+├── Unet_ssd_fusion/
+│   ├── train_fusion.py
+│   ├── fusion_model.py
+│   ├── extract_detection_features.py
+│   └── ...
 │
-├── src/
-│   ├── dataset/
-│   │   ├── stripe_generator.py  ← Injects laser stripes on KITTI/nuScenes frames
-│   │   ├── dataset_builder.py   ← Builds train/val/test splits, generates labels.csv
-│   │   └── dataloader.py        ← PyTorch Dataset + DataLoader
+├── outputs/
+│   ├── unet/
+│   │   └── unet_features.csv
 │   │
-│   ├── models/
-│   │   ├── cnn.py               ← Single CNN (ResNet18 backbone, binary head)
-│   │   └── ensemble.py          ← 6 specialist CNNs + ensemble inference
+│   ├── ssd/
+│   │   └── ssd_features.csv
 │   │
-│   ├── training/
-│   │   ├── train.py             ← Full training loop, checkpointing, early stopping
-│   │   └── losses.py            ← Focal loss (handles class imbalance)
+│   ├── fusion/
+│   │   ├── fusion_binary_final.pth
+│   │   ├── fusion_binary_checkpoint.pth
+│   │   ├── fusion_binary_metadata.json
+│   │   └── binary_test_predictions.csv
 │   │
-│   ├── evaluation/
-│   │   └── evaluate.py          ← F1, AUC, confusion matrix, per-variation breakdown
-│   │
-│   └── utils/
-│       ├── logger.py            ← Clean console + file logging
-│       └── visualize.py         ← Plot stripes, training curves, confusion matrix
+│   └── external_test/
+│       ├── external_unet_features.csv
+│       ├── external_ssd_features.csv
+│       └── external_fusion_predictions.csv
 │
-├── data/
-│   ├── clean_base/              ← Put KITTI images here (and nuScenes if available)
-│   └── final_dataset/           ← Auto-generated by dataset_builder.py
-│       ├── train/
-│       ├── val/
-│       └── test/
-│
-├── notebooks/
-│   └── exploration.ipynb        ← Dataset visualisation, quick experiments
-│
-├── tests/
-│   └── test_pipeline.py         ← Sanity checks before full training run
-│
-├── requirements.txt
-└── run.py                       ← Single entry point for everything
+└── data/
+    └── final_dataset/
+        └── labels.csv
 ```
+
+*Note: The structure above highlights the main files and may not include every project file. Large datasets and model artifacts may be maintained separately from the GitHub repository.*
 
 ---
 
-## Quick Start
+## 8. Technologies Used
 
-### Step 1 — Install dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### Step 2 — Put your KITTI images in data/clean_base/
-```
-data/clean_base/
-    image_0001.png
-    image_0002.png
-    ...
-```
-KITTI download: http://www.cvlibs.net/datasets/kitti/eval_object.php
-→ "Left color images of object data set"
-
-For nuScenes Mini, run:
-```bash
-python run.py --mode extract_nuscenes --nuscenes_root /path/to/nuscenes
-```
-
-### Step 3 — Generate the dataset
-```bash
-python run.py --mode generate
-```
-This creates ~15,000 balanced images (7,500 clean + 7,500 attacked across 6 variation profiles).
-
-### Step 4 — Train
-```bash
-python run.py --mode train --model single      # Single CNN
-python run.py --mode train --model ensemble    # 6-specialist ensemble (recommended)
-```
-
-### Step 5 — Evaluate
-```bash
-python run.py --mode evaluate --checkpoint checkpoints/best_model.pth
-```
-
-### Step 6 — Run both and compare
-```bash
-python run.py --mode compare
-```
+- Python
+- PyTorch
+- Torchvision
+- U-Net
+- SSD300 with VGG16
+- NumPy
+- Pandas
+- Scikit-learn
+- OpenCV
+- Matplotlib
+- Kaggle GPU Environment
 
 ---
 
-## Dataset — 6 Attack Variation Profiles
+## 9. Key Contributions
 
-| Variation | Frequency | Width | Intensity | Angle | Coverage | Research Basis |
-|-----------|-----------|-------|-----------|-------|----------|----------------|
-| freq_low_narrow | 3–5 | 1px | 200–220 | 0° | 100% | Köhler 2021 |
-| freq_low_wide | 3–5 | 4px | 180–200 | 0° | 100% | Stein 2025 |
-| freq_mid_narrow | 6–8 | 1–2px | 160–190 | 0° | 85% | Köhler aiming |
-| freq_mid_wide | 6–8 | 3–4px | 170–200 | 0° | 75% | Stein 2025 |
-| freq_high_narrow | 9–12 | 1px | 150–175 | 0° | 80% | Stein concealment |
-| freq_high_angled | 6–10 | 2–3px | 160–190 | 15–25° | 80% | Köhler angle |
-
----
-
-## Why Ensemble > Single CNN
-
-An attacker can use any laser variation. A single CNN learns a generalised pattern. Each specialist in the ensemble becomes an expert on its variation. When an unseen attack arrives (e.g. freq=4, intensity=190), at least 2–3 specialists partially recognise it — the averaged probability catches it even when no single model is fully confident. Ensemble F1 > Single CNN F1 — demonstrated in evaluation.
+- Developed a segmentation-based approach to identify laser-affected image regions.
+- Integrated U-Net segmentation features with SSD object detection features.
+- Designed a feature-fusion MLP for binary clean/corrupt classification.
+- Addressed class imbalance using weighted Cross Entropy Loss.
+- Maintained consistent feature preprocessing and scaling during evaluation.
+- Evaluated the trained model on an independent dataset generated using a separate rolling-shutter attack engine.
+- Demonstrated external evaluation performance of 82.50% accuracy and 90.66% ROC-AUC without additional training.
 
 ---
 
+## 10. Future Improvements
+
+- Improve robustness against different laser frequencies, intensities and attack patterns.
+- Investigate the domain gap between simulated and independently generated attack datasets.
+- Improve clean-image specificity while maintaining high attack detection recall.
+- Evaluate performance under different camera exposure settings and real-world conditions.
+- Extend testing to additional camera datasets and unseen attack configurations.
+
+---
+
+## Conclusion
+
+The updated system combines U-Net segmentation and SSD object detection through a feature-fusion network to detect laser-induced rolling-shutter interference.
+
+The model achieves **99.49% internal test accuracy** and **82.50% accuracy on an independent external dataset**, with an external ROC-AUC of **90.66%**.
+
+The external evaluation provides an important assessment of the model's ability to generalize beyond its original simulated training data.
